@@ -53,7 +53,7 @@ class StrategyConfig:
     momentum_threshold: float = 0.0
     position_size: float = 1.0
     stop_loss_pct: float = 0.08
-    take_profit_pct: float = 0.16
+    trailing_stop_pct: float = 0.12
 
 
 def discover_bundle(output_dir: str) -> Bundle:
@@ -111,24 +111,26 @@ def strategy_signals(prices: pd.DataFrame, config: StrategyConfig) -> pd.Series:
 
 
 def signal_to_position(prices: pd.DataFrame, signal: pd.Series, config: StrategyConfig) -> pd.Series:
-    """Convert buy/sell/hold signals into long-only position sizing with stop/target exits."""
+    """Convert buy/sell/hold signals into long-only position sizing with stop and trailing exits."""
     close = prices["Close"].astype(float)
     low = prices["Low"].astype(float)
-    high = prices["High"].astype(float)
 
     position = pd.Series(0.0, index=prices.index, dtype=float)
     in_trade = False
     entry_price = math.nan
+    highest_close = math.nan
 
     for i in range(len(prices)):
         if in_trade:
             stop_hit = low.iloc[i] <= entry_price * (1.0 - config.stop_loss_pct)
-            target_hit = high.iloc[i] >= entry_price * (1.0 + config.take_profit_pct)
+            highest_close = max(highest_close, float(close.iloc[i]))
+            trailing_stop_hit = close.iloc[i] <= highest_close * (1.0 - config.trailing_stop_pct)
             explicit_exit = signal.iloc[i] < 0
 
-            if stop_hit or target_hit or explicit_exit:
+            if stop_hit or trailing_stop_hit or explicit_exit:
                 in_trade = False
                 entry_price = math.nan
+                highest_close = math.nan
                 position.iloc[i] = 0.0
                 continue
 
@@ -138,6 +140,7 @@ def signal_to_position(prices: pd.DataFrame, signal: pd.Series, config: Strategy
         if signal.iloc[i] > 0:
             in_trade = True
             entry_price = float(close.iloc[i])
+            highest_close = entry_price
             position.iloc[i] = config.position_size
 
     return position.rename("position")
@@ -293,7 +296,7 @@ def train() -> None:
         momentum_threshold=0.0,
         position_size=1.0,
         stop_loss_pct=0.08,
-        take_profit_pct=0.16,
+        trailing_stop_pct=0.12,
     )
 
     combined_fold_trade_r, combined_samples, cycles = run_time_budgeted_evaluation_loop(
