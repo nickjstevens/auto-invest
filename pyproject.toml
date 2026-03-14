@@ -1,0 +1,20 @@
+[project]
+name = "auto-invest"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "ccxt>=4.5.43",
+    "ffn>=1.1.4",
+    "freqtrade>=2026.2",
+    "matplotlib>=3.10.8",
+    "pandas>=2.3.3",
+    "pandas-ta>=0.4.71b0",
+    "plotly>=6.6.0",
+    "polygon-api-client>=1.16.3",
+    "pyportfolioopt>=1.6.0",
+    "quantstats>=0.0.81",
+    "vectorbt>=0.28.2",
+    "yfinance>=1.2.0",
+]
