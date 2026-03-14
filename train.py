@@ -33,6 +33,7 @@ GENERALIST_BASKET_SIZE = 12
 GENERALIST_WINDOWS_PER_CYCLE = 32
 MIN_TRADES_PER_FOLD_FOR_SQN = int(os.getenv("MIN_TRADES_PER_FOLD_FOR_SQN", "3"))
 MIN_VALID_FOLDS_FOR_ROBUST_SQN = int(os.getenv("MIN_VALID_FOLDS_FOR_ROBUST_SQN", "10"))
+MIN_TOTAL_TRADES_FOR_ROBUST_SQN = int(os.getenv("MIN_TOTAL_TRADES_FOR_ROBUST_SQN", "50"))
 TARGET_TRADES_FOR_FULL_CONFIDENCE = int(os.getenv("TARGET_TRADES_FOR_FULL_CONFIDENCE", "200"))
 TARGET_VALID_FOLDS_FOR_FULL_CONFIDENCE = int(os.getenv("TARGET_VALID_FOLDS_FOR_FULL_CONFIDENCE", "50"))
 
@@ -228,7 +229,7 @@ def robust_sqn_from_folds(fold_trade_r: list[list[float]]) -> dict[str, float]:
         total_valid_trades += len(clean)
         per_fold_sqn.append(float(fold_sqn))
 
-    if valid_folds < MIN_VALID_FOLDS_FOR_ROBUST_SQN:
+    if valid_folds < MIN_VALID_FOLDS_FOR_ROBUST_SQN or total_valid_trades < MIN_TOTAL_TRADES_FOR_ROBUST_SQN:
         return {
             "robust_sqn": math.nan,
             "raw_median_valid_fold_sqn": float(np.median(per_fold_sqn)) if per_fold_sqn else math.nan,
@@ -285,8 +286,9 @@ def train() -> None:
 
     elapsed = time.perf_counter() - start_time
 
-    combined_score = score_from_oos_folds(combined_fold_trade_r)
+    raw_score = score_from_oos_folds(combined_fold_trade_r)
     robust_score = robust_sqn_from_folds(combined_fold_trade_r)
+    combined_score = float(robust_score["robust_sqn"]) if np.isfinite(robust_score["robust_sqn"]) else math.nan
     combined_stats = collect_metrics(combined_samples)
 
     print("Evaluation complete")
@@ -301,9 +303,9 @@ def train() -> None:
         else "combined_score_sqn       : nan"
     )
     print(
-        f"combined_score_sqn_robust: {robust_score['robust_sqn']:.6f}"
-        if np.isfinite(robust_score["robust_sqn"])
-        else "combined_score_sqn_robust: nan"
+        f"combined_score_sqn_raw   : {raw_score:.6f}"
+        if np.isfinite(raw_score)
+        else "combined_score_sqn_raw   : nan"
     )
     print(f"valid_folds_for_robust   : {int(robust_score['valid_folds'])}")
     print(f"valid_trades_for_robust  : {int(robust_score['total_valid_trades'])}")
