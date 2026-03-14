@@ -100,12 +100,17 @@ def download_price_history(symbol: str, start: str, end: str | None) -> pd.DataF
     return out.sort_index().dropna()
 
 
-def sqn(net_r_multiples: Sequence[float]) -> float:
+MIN_TRADES_PER_FOLD = 5
+MIN_VALID_FOLDS = 25
+FOLD_SHRINKAGE = 25.0
+
+
+def sqn(net_r_multiples: Sequence[float], min_trades: int = MIN_TRADES_PER_FOLD) -> float:
     """System Quality Number for a sequence of net R-multiples."""
     arr = np.asarray(net_r_multiples, dtype=float)
     arr = arr[np.isfinite(arr)]
 
-    if arr.size < 2:
+    if arr.size < max(2, min_trades):
         return math.nan
 
     stdev = float(arr.std(ddof=1))
@@ -115,13 +120,22 @@ def sqn(net_r_multiples: Sequence[float]) -> float:
     return float(np.sqrt(arr.size) * arr.mean() / stdev)
 
 
-def score_from_oos_folds(oos_net_r_multiples: Iterable[Sequence[float]]) -> float:
-    """Evaluation metric: median SQN across folds."""
-    per_fold_sqn = [sqn(fold_values) for fold_values in oos_net_r_multiples]
+def score_from_oos_folds(
+    oos_net_r_multiples: Iterable[Sequence[float]],
+    min_trades_per_fold: int = MIN_TRADES_PER_FOLD,
+    min_valid_folds: int = MIN_VALID_FOLDS,
+    fold_shrinkage: float = FOLD_SHRINKAGE,
+) -> float:
+    """Evaluation metric: sample-size-aware median SQN across folds."""
+    per_fold_sqn = [sqn(fold_values, min_trades=min_trades_per_fold) for fold_values in oos_net_r_multiples]
     per_fold_sqn = [v for v in per_fold_sqn if np.isfinite(v)]
-    if not per_fold_sqn:
+    valid_folds = len(per_fold_sqn)
+    if valid_folds < min_valid_folds:
         return math.nan
-    return float(np.median(per_fold_sqn))
+
+    raw_median = float(np.median(per_fold_sqn))
+    fold_confidence = float(np.sqrt(valid_folds / (valid_folds + fold_shrinkage)))
+    return raw_median * fold_confidence
 
 
 def save_preparation_bundle(
@@ -153,8 +167,12 @@ def save_preparation_bundle(
         "symbols": summaries,
         "evaluation_metric": {
             "name": "median_fold_sqn",
-            "formula": "score = median(SQN of net R-multiples on each OOS fold)",
+            "formula": "score = median(SQN on valid folds) * sqrt(valid_folds / (valid_folds + 25))",
             "sqn": "SQN = sqrt(n) * mean(R) / std(R, ddof=1)",
+            "constraints": {
+                "min_trades_per_fold": MIN_TRADES_PER_FOLD,
+                "min_valid_folds": MIN_VALID_FOLDS,
+            },
             "function": "score_from_oos_folds",
         },
     }

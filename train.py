@@ -20,7 +20,12 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from prepare import DEFAULT_OUTPUT_DIR, score_from_oos_folds
+from prepare import (
+    DEFAULT_OUTPUT_DIR,
+    MIN_TRADES_PER_FOLD,
+    MIN_VALID_FOLDS,
+    score_from_oos_folds,
+)
 
 
 DEFAULT_RISK_FRACTION = 0.02
@@ -126,16 +131,25 @@ def evaluate_slice(
     sharpe = float(np.sqrt(252.0) * strategy_ret.mean() / vol) if vol > 0 else math.nan
 
     trade_r: list[float] = []
+    trade_duration_bars: list[float] = []
+    trade_duration_days: list[float] = []
     in_trade = False
     entry_equity = 1.0
+    entry_idx = 0
     for i in range(len(df)):
         if not in_trade and position.iloc[i] > 0 and (i == 0 or position.iloc[i - 1] <= 0):
             in_trade = True
             entry_equity = float(equity.iloc[i - 1]) if i > 0 else 1.0
+            entry_idx = i
         if in_trade and (position.iloc[i] <= 0 or i == len(df) - 1):
             exit_equity = float(equity.iloc[i])
             trade_ret = exit_equity / entry_equity - 1.0
             trade_r.append(float(trade_ret / risk_fraction))
+
+            bars_open = float(i - entry_idx + 1)
+            days_open = float((df.index[i] - df.index[entry_idx]).days)
+            trade_duration_bars.append(bars_open)
+            trade_duration_days.append(days_open)
             in_trade = False
 
     wins = sum(1 for r in trade_r if r > 0)
@@ -143,6 +157,8 @@ def evaluate_slice(
 
     return {
         "trade_r": trade_r,
+        "trade_duration_bars": trade_duration_bars,
+        "trade_duration_days": trade_duration_days,
         "total_return": total_return,
         "cagr": cagr,
         "max_drawdown": max_drawdown,
@@ -174,6 +190,18 @@ def collect_metrics(samples: list[dict[str, float | list[float]]]) -> dict[str, 
         for r in sample["trade_r"]
         if np.isfinite(float(r))
     ]
+    trade_duration_bars = [
+        float(bars)
+        for sample in samples
+        for bars in sample["trade_duration_bars"]
+        if np.isfinite(float(bars))
+    ]
+    trade_duration_days = [
+        float(days)
+        for sample in samples
+        for days in sample["trade_duration_days"]
+        if np.isfinite(float(days))
+    ]
 
     return {
         "median_cagr": float(np.median(cagr)) if cagr else math.nan,
@@ -181,6 +209,8 @@ def collect_metrics(samples: list[dict[str, float | list[float]]]) -> dict[str, 
         "median_sharpe": float(np.median(sharpe)) if sharpe else math.nan,
         "median_win_rate": float(np.median(win_rate)) if win_rate else math.nan,
         "median_trade_r": float(np.median(trade_r)) if trade_r else math.nan,
+        "median_trade_duration_bars": float(np.median(trade_duration_bars)) if trade_duration_bars else math.nan,
+        "median_trade_duration_days": float(np.median(trade_duration_days)) if trade_duration_days else math.nan,
     }
 
 
@@ -217,6 +247,7 @@ def train() -> None:
 
     elapsed = time.perf_counter() - start_time
 
+    valid_folds = sum(1 for fold in combined_fold_trade_r if len(fold) >= MIN_TRADES_PER_FOLD)
     combined_score = score_from_oos_folds(combined_fold_trade_r)
     combined_stats = collect_metrics(combined_samples)
 
@@ -226,6 +257,8 @@ def train() -> None:
     print(f"cycles_completed         : {cycles}")
     print(f"universe_size            : {len(bundle.symbols)}")
     print(f"combined_folds           : {len(combined_fold_trade_r)}")
+    print(f"valid_folds_for_sqn      : {valid_folds}")
+    print(f"min_valid_folds_required : {MIN_VALID_FOLDS}")
     print(
         f"combined_score_sqn       : {combined_score:.6f}"
         if np.isfinite(combined_score)
@@ -255,6 +288,16 @@ def train() -> None:
         f"combined_median_trade_r  : {combined_stats['median_trade_r']:.3f}R"
         if np.isfinite(combined_stats["median_trade_r"])
         else "combined_median_trade_r  : nan"
+    )
+    print(
+        f"median_trade_open_bars   : {combined_stats['median_trade_duration_bars']:.1f}"
+        if np.isfinite(combined_stats["median_trade_duration_bars"])
+        else "median_trade_open_bars   : nan"
+    )
+    print(
+        f"median_trade_open_days   : {combined_stats['median_trade_duration_days']:.1f}"
+        if np.isfinite(combined_stats["median_trade_duration_days"])
+        else "median_trade_open_days   : nan"
     )
 
 
