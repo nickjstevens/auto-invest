@@ -23,6 +23,10 @@ uv run train.py
 `train.py` uses a fixed `TIME_BUDGET_SECONDS` budget and repeatedly samples
 random windows from full histories to evaluate:
 
+- Indicators and signals can use all available prior history up to each sampled
+  window end (backward-looking only, no future leakage).
+- Trading and scoring remain constrained to the sampled random window.
+
 - **Generalist mode**: random basket of symbols and many random windows.
 - **Specialist mode**: one specialist symbol (default GLD) across chronological
   regimes, each with random windows.
