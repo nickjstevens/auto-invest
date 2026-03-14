@@ -22,6 +22,12 @@ import pandas as pd
 
 from prepare import (
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_FEE_BPS,
+    DEFAULT_RANDOM_SEED,
+    GENERALIST_BASKET_SIZE,
+    GENERALIST_WINDOWS_PER_CYCLE,
+    MAX_WINDOW_BARS,
+    MIN_WINDOW_BARS,
     MIN_TRADES_PER_FOLD,
     MIN_VALID_FOLDS,
     run_time_budgeted_evaluation_loop,
@@ -30,13 +36,7 @@ from prepare import (
 
 
 DEFAULT_RISK_FRACTION = 0.02
-DEFAULT_FEE_BPS = 2.0
 TIME_BUDGET_SECONDS = float(os.getenv("TIME_BUDGET_SECONDS", "300"))
-DEFAULT_RANDOM_SEED = 42
-MIN_WINDOW_BARS = 252
-MAX_WINDOW_BARS = 756
-GENERALIST_BASKET_SIZE = 12
-GENERALIST_WINDOWS_PER_CYCLE = 32
 
 
 @dataclass(frozen=True)
@@ -146,6 +146,7 @@ def signal_to_position(prices: pd.DataFrame, signal: pd.Series, config: Strategy
 def evaluate_slice(
     prices: pd.DataFrame,
     strategy_config: StrategyConfig,
+    trade_start_idx: int = 0,
     risk_fraction: float = DEFAULT_RISK_FRACTION,
     fee_bps: float = DEFAULT_FEE_BPS,
 ) -> dict[str, float | list[float]]:
@@ -155,8 +156,12 @@ def evaluate_slice(
         raise ValueError(f"Price dataframe missing columns: {sorted(missing)}")
 
     df = prices.copy()
+    if not 0 <= trade_start_idx < len(df):
+        raise ValueError("trade_start_idx must be within the available price history.")
+
     signal = strategy_signals(df, strategy_config)
     position = signal_to_position(df, signal, strategy_config).clip(lower=0.0, upper=1.0).fillna(0.0)
+    position.iloc[:trade_start_idx] = 0.0
     if len(position) != len(df):
         raise ValueError("strategy must return a series aligned with prices index.")
 
@@ -168,18 +173,22 @@ def evaluate_slice(
     cost = turnover * fee_rate
 
     strategy_ret = traded_position * ret - cost
-    equity = (1.0 + strategy_ret).cumprod()
+    strategy_ret_eval = strategy_ret.iloc[trade_start_idx:]
+    position_eval = position.iloc[trade_start_idx:]
+    df_eval = df.iloc[trade_start_idx:]
+
+    equity = (1.0 + strategy_ret_eval).cumprod()
 
     peaks = equity.cummax()
     drawdown = equity / peaks - 1.0
     max_drawdown = float(drawdown.min())
 
-    years = max((df.index[-1] - df.index[0]).days / 365.25, 1 / 365.25)
+    years = max((df_eval.index[-1] - df_eval.index[0]).days / 365.25, 1 / 365.25)
     total_return = float(equity.iloc[-1] - 1.0)
     cagr = float((equity.iloc[-1] ** (1.0 / years)) - 1.0)
 
-    vol = float(strategy_ret.std(ddof=1))
-    sharpe = float(np.sqrt(252.0) * strategy_ret.mean() / vol) if vol > 0 else math.nan
+    vol = float(strategy_ret_eval.std(ddof=1))
+    sharpe = float(np.sqrt(252.0) * strategy_ret_eval.mean() / vol) if vol > 0 else math.nan
 
     trade_r: list[float] = []
     trade_duration_bars: list[float] = []
@@ -187,18 +196,18 @@ def evaluate_slice(
     in_trade = False
     entry_equity = 1.0
     entry_idx = 0
-    for i in range(len(df)):
-        if not in_trade and position.iloc[i] > 0 and (i == 0 or position.iloc[i - 1] <= 0):
+    for i in range(len(df_eval)):
+        if not in_trade and position_eval.iloc[i] > 0 and (i == 0 or position_eval.iloc[i - 1] <= 0):
             in_trade = True
             entry_equity = float(equity.iloc[i - 1]) if i > 0 else 1.0
             entry_idx = i
-        if in_trade and (position.iloc[i] <= 0 or i == len(df) - 1):
+        if in_trade and (position_eval.iloc[i] <= 0 or i == len(df_eval) - 1):
             exit_equity = float(equity.iloc[i])
             trade_ret = exit_equity / entry_equity - 1.0
             trade_r.append(float(trade_ret / risk_fraction))
 
             bars_open = float(i - entry_idx + 1)
-            days_open = float((df.index[i] - df.index[entry_idx]).days)
+            days_open = float((df_eval.index[i] - df_eval.index[entry_idx]).days)
             trade_duration_bars.append(bars_open)
             trade_duration_days.append(days_open)
             in_trade = False
@@ -227,7 +236,11 @@ def random_window(prices: pd.DataFrame, rng: np.random.Generator) -> pd.DataFram
 
     length = int(rng.integers(MIN_WINDOW_BARS, min(MAX_WINDOW_BARS, n) + 1))
     start_idx = int(rng.integers(0, n - length + 1))
-    return prices.iloc[start_idx : start_idx + length]
+    end_idx = start_idx + length
+
+    history_plus_window = prices.iloc[:end_idx].copy()
+    history_plus_window.attrs["trade_start_idx"] = start_idx
+    return history_plus_window
 
 
 def collect_metrics(samples: list[dict[str, float | list[float]]]) -> dict[str, float]:
@@ -292,7 +305,11 @@ def train() -> None:
         generalist_basket_size=GENERALIST_BASKET_SIZE,
         generalist_windows_per_cycle=GENERALIST_WINDOWS_PER_CYCLE,
         random_window_fn=random_window,
-        evaluate_slice_fn=lambda window: evaluate_slice(window, strategy_config=strategy_config),
+        evaluate_slice_fn=lambda window: evaluate_slice(
+            window,
+            strategy_config=strategy_config,
+            trade_start_idx=int(window.attrs.get("trade_start_idx", 0)),
+        ),
     )
 
     elapsed = time.perf_counter() - start_time
