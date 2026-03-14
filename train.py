@@ -4,11 +4,9 @@ Time-budgeted evaluation runner for prepared trading datasets.
 Usage:
     uv run train.py
 
-The runner evaluates a strategy in two modes:
-  1) Generalist: many random windows sampled from a random basket of symbols.
-  2) Specialist: one symbol sampled across explicit chronological regimes.
-
-Evaluation continues until TIME_BUDGET_SECONDS is exhausted.
+The runner samples random symbols and random windows from the prepared universe
+until TIME_BUDGET_SECONDS is exhausted, producing a single SQN score suitable
+for optimisation.
 """
 
 from __future__ import annotations
@@ -33,14 +31,11 @@ MIN_WINDOW_BARS = 252
 MAX_WINDOW_BARS = 756
 GENERALIST_BASKET_SIZE = 12
 GENERALIST_WINDOWS_PER_CYCLE = 32
-SPECIALIST_WINDOWS_PER_REGIME = 24
-REGIME_COUNT = 4
 
 
 @dataclass(frozen=True)
 class Bundle:
     symbols: list[str]
-    specialist_symbol: str
     output_dir: str
 
 
@@ -53,10 +48,8 @@ def discover_bundle(output_dir: str) -> Bundle:
         with open(manifest_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
         symbols = [str(item["symbol"]).upper() for item in payload.get("symbols", []) if item.get("symbol")]
-        specialist_symbol = str(payload.get("specialist_symbol") or "").upper()
     else:
         symbols = []
-        specialist_symbol = ""
 
     if not symbols:
         symbols = [
@@ -69,10 +62,7 @@ def discover_bundle(output_dir: str) -> Bundle:
     if not symbols:
         raise FileNotFoundError(f"No prepared price files found in {output_dir}. Run prepare.py first.")
 
-    if specialist_symbol not in symbols:
-        specialist_symbol = "GLD" if "GLD" in symbols else symbols[0]
-
-    return Bundle(symbols=symbols, specialist_symbol=specialist_symbol, output_dir=output_dir)
+    return Bundle(symbols=symbols, output_dir=output_dir)
 
 
 def load_prices(output_dir: str, symbol: str) -> pd.DataFrame:
@@ -173,24 +163,6 @@ def random_window(prices: pd.DataFrame, rng: np.random.Generator) -> pd.DataFram
     return prices.iloc[start_idx : start_idx + length]
 
 
-def specialist_regime_windows(prices: pd.DataFrame, rng: np.random.Generator) -> list[pd.DataFrame]:
-    windows: list[pd.DataFrame] = []
-    n = len(prices)
-    if n < MIN_WINDOW_BARS:
-        return windows
-
-    boundaries = np.linspace(0, n, REGIME_COUNT + 1, dtype=int)
-    for regime_id in range(REGIME_COUNT):
-        lo = int(boundaries[regime_id])
-        hi = int(boundaries[regime_id + 1])
-        regime_slice = prices.iloc[lo:hi]
-        if len(regime_slice) < MIN_WINDOW_BARS:
-            continue
-        for _ in range(SPECIALIST_WINDOWS_PER_REGIME):
-            windows.append(random_window(regime_slice, rng))
-    return windows
-
-
 def collect_metrics(samples: list[dict[str, float | list[float]]]) -> dict[str, float]:
     cagr = [float(m["cagr"]) for m in samples if np.isfinite(float(m["cagr"]))]
     mdd = [float(m["max_drawdown"]) for m in samples if np.isfinite(float(m["max_drawdown"]))]
@@ -213,12 +185,8 @@ def train() -> None:
     bundle = discover_bundle(DEFAULT_OUTPUT_DIR)
     prices_by_symbol = {symbol: load_prices(bundle.output_dir, symbol) for symbol in bundle.symbols}
 
-    generalist_fold_trade_r: list[list[float]] = []
-    generalist_samples: list[dict[str, float | list[float]]] = []
-    specialist_fold_trade_r: list[list[float]] = []
-    specialist_samples: list[dict[str, float | list[float]]] = []
-
-    specialist_prices = prices_by_symbol[bundle.specialist_symbol]
+    combined_fold_trade_r: list[list[float]] = []
+    combined_samples: list[dict[str, float | list[float]]] = []
     cycles = 0
 
     while time.perf_counter() < deadline:
@@ -237,69 +205,45 @@ def train() -> None:
                     break
                 window = random_window(prices, rng)
                 metrics = evaluate_slice(window)
-                generalist_fold_trade_r.append(metrics["trade_r"])
-                generalist_samples.append(metrics)
-
-        for window in specialist_regime_windows(specialist_prices, rng):
-            if time.perf_counter() >= deadline:
-                break
-            metrics = evaluate_slice(window)
-            specialist_fold_trade_r.append(metrics["trade_r"])
-            specialist_samples.append(metrics)
+                combined_fold_trade_r.append(metrics["trade_r"])
+                combined_samples.append(metrics)
 
     elapsed = time.perf_counter() - start_time
 
-    generalist_score = score_from_oos_folds(generalist_fold_trade_r)
-    specialist_score = score_from_oos_folds(specialist_fold_trade_r)
-
-    generalist_stats = collect_metrics(generalist_samples)
-    specialist_stats = collect_metrics(specialist_samples)
+    combined_score = score_from_oos_folds(combined_fold_trade_r)
+    combined_stats = collect_metrics(combined_samples)
 
     print("Evaluation complete")
     print(f"time_budget_seconds      : {TIME_BUDGET_SECONDS:.1f}")
     print(f"elapsed_seconds          : {elapsed:.1f}")
     print(f"cycles_completed         : {cycles}")
     print(f"universe_size            : {len(bundle.symbols)}")
-    print(f"specialist_symbol        : {bundle.specialist_symbol}")
-    print(f"generalist_folds         : {len(generalist_fold_trade_r)}")
-    print(f"specialist_folds         : {len(specialist_fold_trade_r)}")
+    print(f"combined_folds           : {len(combined_fold_trade_r)}")
     print(
-        f"generalist_score_sqn     : {generalist_score:.6f}"
-        if np.isfinite(generalist_score)
-        else "generalist_score_sqn     : nan"
-    )
-    print(
-        f"specialist_score_sqn     : {specialist_score:.6f}"
-        if np.isfinite(specialist_score)
-        else "specialist_score_sqn     : nan"
-    )
-    print(
-        f"combined_score_sqn       : {np.nanmedian([generalist_score, specialist_score]):.6f}"
-        if np.isfinite(generalist_score) or np.isfinite(specialist_score)
+        f"combined_score_sqn       : {combined_score:.6f}"
+        if np.isfinite(combined_score)
         else "combined_score_sqn       : nan"
     )
-
-    for label, stats in (("generalist", generalist_stats), ("specialist", specialist_stats)):
-        print(
-            f"{label}_median_cagr      : {stats['median_cagr']:.2%}"
-            if np.isfinite(stats["median_cagr"])
-            else f"{label}_median_cagr      : nan"
-        )
-        print(
-            f"{label}_median_drawdown  : {stats['median_max_drawdown']:.2%}"
-            if np.isfinite(stats["median_max_drawdown"])
-            else f"{label}_median_drawdown  : nan"
-        )
-        print(
-            f"{label}_median_sharpe    : {stats['median_sharpe']:.3f}"
-            if np.isfinite(stats["median_sharpe"])
-            else f"{label}_median_sharpe    : nan"
-        )
-        print(
-            f"{label}_median_win_rate  : {stats['median_win_rate']:.2%}"
-            if np.isfinite(stats["median_win_rate"])
-            else f"{label}_median_win_rate  : nan"
-        )
+    print(
+        f"combined_median_cagr     : {combined_stats['median_cagr']:.2%}"
+        if np.isfinite(combined_stats["median_cagr"])
+        else "combined_median_cagr     : nan"
+    )
+    print(
+        f"combined_median_drawdown : {combined_stats['median_max_drawdown']:.2%}"
+        if np.isfinite(combined_stats["median_max_drawdown"])
+        else "combined_median_drawdown : nan"
+    )
+    print(
+        f"combined_median_sharpe   : {combined_stats['median_sharpe']:.3f}"
+        if np.isfinite(combined_stats["median_sharpe"])
+        else "combined_median_sharpe   : nan"
+    )
+    print(
+        f"combined_median_win_rate : {combined_stats['median_win_rate']:.2%}"
+        if np.isfinite(combined_stats["median_win_rate"])
+        else "combined_median_win_rate : nan"
+    )
 
 
 if __name__ == "__main__":
