@@ -24,6 +24,7 @@ from prepare import (
     DEFAULT_OUTPUT_DIR,
     MIN_TRADES_PER_FOLD,
     MIN_VALID_FOLDS,
+    run_time_budgeted_evaluation_loop,
     score_from_oos_folds,
 )
 
@@ -42,6 +43,17 @@ GENERALIST_WINDOWS_PER_CYCLE = 32
 class Bundle:
     symbols: list[str]
     output_dir: str
+
+
+@dataclass(frozen=True)
+class StrategyConfig:
+    fast_ma_bars: int = 20
+    slow_ma_bars: int = 200
+    momentum_bars: int = 20
+    momentum_threshold: float = 0.0
+    position_size: float = 1.0
+    stop_loss_pct: float = 0.08
+    take_profit_pct: float = 0.16
 
 
 def discover_bundle(output_dir: str) -> Bundle:
@@ -77,37 +89,76 @@ def load_prices(output_dir: str, symbol: str) -> pd.DataFrame:
     return prices.sort_index()
 
 
-def strategy_positions(prices: pd.DataFrame) -> pd.Series:
+def strategy_signals(prices: pd.DataFrame, config: StrategyConfig) -> pd.Series:
     """
-    Strategy hook.
-
-    Simple regime-aware trend baseline:
-      - Above 200DMA and positive 20-day momentum -> long 1.0
-      - Otherwise flat 0.0
+    Strategy hook that outputs discrete actions:
+      -  1.0 = buy/enter long
+      -  0.0 = hold
+      - -1.0 = sell/exit
     """
     close = prices["Close"].astype(float)
-    ma_fast = close.rolling(20, min_periods=20).mean()
-    ma_slow = close.rolling(200, min_periods=200).mean()
-    momentum = close.pct_change(20)
+    ma_fast = close.rolling(config.fast_ma_bars, min_periods=config.fast_ma_bars).mean()
+    ma_slow = close.rolling(config.slow_ma_bars, min_periods=config.slow_ma_bars).mean()
+    momentum = close.pct_change(config.momentum_bars)
 
-    long_signal = (ma_fast > ma_slow) & (momentum > 0)
-    return long_signal.astype(float).reindex(prices.index).fillna(0.0).rename("position")
+    buy_signal = (ma_fast > ma_slow) & (momentum > config.momentum_threshold)
+    sell_signal = (ma_fast < ma_slow) | (momentum < -config.momentum_threshold)
+
+    signal = pd.Series(0.0, index=prices.index, dtype=float)
+    signal = signal.mask(buy_signal, 1.0)
+    signal = signal.mask(sell_signal, -1.0)
+    return signal.rename("signal")
+
+
+def signal_to_position(prices: pd.DataFrame, signal: pd.Series, config: StrategyConfig) -> pd.Series:
+    """Convert buy/sell/hold signals into long-only position sizing with stop/target exits."""
+    close = prices["Close"].astype(float)
+    low = prices["Low"].astype(float)
+    high = prices["High"].astype(float)
+
+    position = pd.Series(0.0, index=prices.index, dtype=float)
+    in_trade = False
+    entry_price = math.nan
+
+    for i in range(len(prices)):
+        if in_trade:
+            stop_hit = low.iloc[i] <= entry_price * (1.0 - config.stop_loss_pct)
+            target_hit = high.iloc[i] >= entry_price * (1.0 + config.take_profit_pct)
+            explicit_exit = signal.iloc[i] < 0
+
+            if stop_hit or target_hit or explicit_exit:
+                in_trade = False
+                entry_price = math.nan
+                position.iloc[i] = 0.0
+                continue
+
+            position.iloc[i] = config.position_size
+            continue
+
+        if signal.iloc[i] > 0:
+            in_trade = True
+            entry_price = float(close.iloc[i])
+            position.iloc[i] = config.position_size
+
+    return position.rename("position")
 
 
 def evaluate_slice(
     prices: pd.DataFrame,
+    strategy_config: StrategyConfig,
     risk_fraction: float = DEFAULT_RISK_FRACTION,
     fee_bps: float = DEFAULT_FEE_BPS,
 ) -> dict[str, float | list[float]]:
-    required = {"Open", "Close", "Low"}
+    required = {"Open", "Close", "Low", "High"}
     missing = required - set(prices.columns)
     if missing:
         raise ValueError(f"Price dataframe missing columns: {sorted(missing)}")
 
     df = prices.copy()
-    position = strategy_positions(df).clip(lower=0.0, upper=1.0).fillna(0.0)
+    signal = strategy_signals(df, strategy_config)
+    position = signal_to_position(df, signal, strategy_config).clip(lower=0.0, upper=1.0).fillna(0.0)
     if len(position) != len(df):
-        raise ValueError("strategy_positions must return a series aligned with prices index.")
+        raise ValueError("strategy must return a series aligned with prices index.")
 
     ret = df["Close"].pct_change().fillna(0.0)
     traded_position = position.shift(1).fillna(0.0)
@@ -222,28 +273,27 @@ def train() -> None:
     bundle = discover_bundle(DEFAULT_OUTPUT_DIR)
     prices_by_symbol = {symbol: load_prices(bundle.output_dir, symbol) for symbol in bundle.symbols}
 
-    combined_fold_trade_r: list[list[float]] = []
-    combined_samples: list[dict[str, float | list[float]]] = []
-    cycles = 0
+    strategy_config = StrategyConfig(
+        fast_ma_bars=20,
+        slow_ma_bars=200,
+        momentum_bars=20,
+        momentum_threshold=0.0,
+        position_size=1.0,
+        stop_loss_pct=0.08,
+        take_profit_pct=0.16,
+    )
 
-    while time.perf_counter() < deadline:
-        cycles += 1
-
-        basket_size = min(GENERALIST_BASKET_SIZE, len(bundle.symbols))
-        basket = rng.choice(bundle.symbols, size=basket_size, replace=False)
-
-        for symbol in basket:
-            prices = prices_by_symbol[str(symbol)]
-            if len(prices) < MIN_WINDOW_BARS:
-                continue
-
-            for _ in range(GENERALIST_WINDOWS_PER_CYCLE):
-                if time.perf_counter() >= deadline:
-                    break
-                window = random_window(prices, rng)
-                metrics = evaluate_slice(window)
-                combined_fold_trade_r.append(metrics["trade_r"])
-                combined_samples.append(metrics)
+    combined_fold_trade_r, combined_samples, cycles = run_time_budgeted_evaluation_loop(
+        symbols=bundle.symbols,
+        prices_by_symbol=prices_by_symbol,
+        deadline=deadline,
+        rng=rng,
+        min_window_bars=MIN_WINDOW_BARS,
+        generalist_basket_size=GENERALIST_BASKET_SIZE,
+        generalist_windows_per_cycle=GENERALIST_WINDOWS_PER_CYCLE,
+        random_window_fn=random_window,
+        evaluate_slice_fn=lambda window: evaluate_slice(window, strategy_config=strategy_config),
+    )
 
     elapsed = time.perf_counter() - start_time
 
