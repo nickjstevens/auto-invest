@@ -1,11 +1,14 @@
 """
-Simple evaluation runner for prepared trading datasets.
+Time-budgeted evaluation runner for prepared trading datasets.
 
 Usage:
     uv run train.py
 
-This script intentionally keeps the workflow minimal so an external agent can
-rewrite/replace strategy logic directly in this file.
+The runner evaluates a strategy in two modes:
+  1) Generalist: many random windows sampled from a random basket of symbols.
+  2) Specialist: one symbol sampled across explicit chronological regimes.
+
+Evaluation continues until TIME_BUDGET_SECONDS is exhausted.
 """
 
 from __future__ import annotations
@@ -13,72 +16,87 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
-from prepare import DEFAULT_OUTPUT_DIR, Fold, score_from_oos_folds
+from prepare import DEFAULT_OUTPUT_DIR, score_from_oos_folds
 
 
 DEFAULT_RISK_FRACTION = 0.02
 DEFAULT_FEE_BPS = 2.0
+TIME_BUDGET_SECONDS = float(os.getenv("TIME_BUDGET_SECONDS", "300"))
+DEFAULT_RANDOM_SEED = 42
+MIN_WINDOW_BARS = 252
+MAX_WINDOW_BARS = 756
+GENERALIST_BASKET_SIZE = 12
+GENERALIST_WINDOWS_PER_CYCLE = 32
+SPECIALIST_WINDOWS_PER_REGIME = 24
+REGIME_COUNT = 4
 
 
 @dataclass(frozen=True)
 class Bundle:
-    symbol: str
-    prices_path: str
-    folds_path: str
+    symbols: list[str]
+    specialist_symbol: str
+    output_dir: str
 
 
 def discover_bundle(output_dir: str) -> Bundle:
-    """Pick the most recently modified symbol bundle from the output directory."""
     if not os.path.exists(output_dir):
         raise FileNotFoundError(f"Output directory does not exist: {output_dir}. Run prepare.py first.")
 
-    price_files = [f for f in os.listdir(output_dir) if f.startswith("prices_") and f.endswith(".parquet")]
-    if not price_files:
+    manifest_path = os.path.join(output_dir, "prep_universe.json")
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        symbols = [str(item["symbol"]).upper() for item in payload.get("symbols", []) if item.get("symbol")]
+        specialist_symbol = str(payload.get("specialist_symbol") or "").upper()
+    else:
+        symbols = []
+        specialist_symbol = ""
+
+    if not symbols:
+        symbols = [
+            f.removeprefix("prices_").removesuffix(".parquet").upper()
+            for f in os.listdir(output_dir)
+            if f.startswith("prices_") and f.endswith(".parquet")
+        ]
+
+    symbols = sorted(set(symbols))
+    if not symbols:
         raise FileNotFoundError(f"No prepared price files found in {output_dir}. Run prepare.py first.")
 
-    candidates: list[Bundle] = []
-    for filename in price_files:
-        symbol = filename.removeprefix("prices_").removesuffix(".parquet")
-        prices_path = os.path.join(output_dir, filename)
-        folds_path = os.path.join(output_dir, f"folds_{symbol}.json")
-        if os.path.exists(folds_path):
-            candidates.append(Bundle(symbol=symbol, prices_path=prices_path, folds_path=folds_path))
+    if specialist_symbol not in symbols:
+        specialist_symbol = "GLD" if "GLD" in symbols else symbols[0]
 
-    if not candidates:
-        raise FileNotFoundError(f"Found prices files in {output_dir}, but no matching folds_*.json files.")
-
-    latest = max(candidates, key=lambda b: os.path.getmtime(b.prices_path))
-    return latest
+    return Bundle(symbols=symbols, specialist_symbol=specialist_symbol, output_dir=output_dir)
 
 
-def load_bundle(bundle: Bundle) -> tuple[pd.DataFrame, list[Fold]]:
-    prices = pd.read_parquet(bundle.prices_path)
+def load_prices(output_dir: str, symbol: str) -> pd.DataFrame:
+    path = os.path.join(output_dir, f"prices_{symbol}.parquet")
+    prices = pd.read_parquet(path)
     prices.index = pd.to_datetime(prices.index)
-    prices = prices.sort_index()
-
-    with open(bundle.folds_path, "r", encoding="utf-8") as f:
-        raw_folds = json.load(f)
-
-    folds = [Fold(**item) for item in raw_folds]
-    if not folds:
-        raise RuntimeError("No folds found in preparation bundle.")
-
-    return prices, folds
+    return prices.sort_index()
 
 
 def strategy_positions(prices: pd.DataFrame) -> pd.Series:
     """
     Strategy hook.
 
-    By default this is always long (1.0). Replace this function when testing
-    other strategies; keep output aligned to ``prices.index`` and between 0..1.
+    Simple regime-aware trend baseline:
+      - Above 200DMA and positive 20-day momentum -> long 1.0
+      - Otherwise flat 0.0
     """
-    return pd.Series(1.0, index=prices.index, name="position")
+    close = prices["Close"].astype(float)
+    ma_fast = close.rolling(20, min_periods=20).mean()
+    ma_slow = close.rolling(200, min_periods=200).mean()
+    momentum = close.pct_change(20)
+
+    long_signal = (ma_fast > ma_slow) & (momentum > 0)
+    return long_signal.astype(float).reindex(prices.index).fillna(0.0).rename("position")
 
 
 def evaluate_slice(
@@ -117,7 +135,6 @@ def evaluate_slice(
     vol = float(strategy_ret.std(ddof=1))
     sharpe = float(np.sqrt(252.0) * strategy_ret.mean() / vol) if vol > 0 else math.nan
 
-    # Trade segmentation: each positive step in position starts a trade.
     trade_r: list[float] = []
     in_trade = False
     entry_equity = 1.0
@@ -132,7 +149,6 @@ def evaluate_slice(
             in_trade = False
 
     wins = sum(1 for r in trade_r if r > 0)
-    losses = sum(1 for r in trade_r if r <= 0)
     win_rate = float(wins / len(trade_r)) if trade_r else math.nan
 
     return {
@@ -144,76 +160,146 @@ def evaluate_slice(
         "num_trades": float(len(trade_r)),
         "win_rate": win_rate,
         "wins": float(wins),
-        "losses": float(losses),
+    }
+
+
+def random_window(prices: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    n = len(prices)
+    if n < MIN_WINDOW_BARS:
+        raise ValueError("Not enough history for random window sampling.")
+
+    length = int(rng.integers(MIN_WINDOW_BARS, min(MAX_WINDOW_BARS, n) + 1))
+    start_idx = int(rng.integers(0, n - length + 1))
+    return prices.iloc[start_idx : start_idx + length]
+
+
+def specialist_regime_windows(prices: pd.DataFrame, rng: np.random.Generator) -> list[pd.DataFrame]:
+    windows: list[pd.DataFrame] = []
+    n = len(prices)
+    if n < MIN_WINDOW_BARS:
+        return windows
+
+    boundaries = np.linspace(0, n, REGIME_COUNT + 1, dtype=int)
+    for regime_id in range(REGIME_COUNT):
+        lo = int(boundaries[regime_id])
+        hi = int(boundaries[regime_id + 1])
+        regime_slice = prices.iloc[lo:hi]
+        if len(regime_slice) < MIN_WINDOW_BARS:
+            continue
+        for _ in range(SPECIALIST_WINDOWS_PER_REGIME):
+            windows.append(random_window(regime_slice, rng))
+    return windows
+
+
+def collect_metrics(samples: list[dict[str, float | list[float]]]) -> dict[str, float]:
+    cagr = [float(m["cagr"]) for m in samples if np.isfinite(float(m["cagr"]))]
+    mdd = [float(m["max_drawdown"]) for m in samples if np.isfinite(float(m["max_drawdown"]))]
+    sharpe = [float(m["sharpe"]) for m in samples if np.isfinite(float(m["sharpe"]))]
+    win_rate = [float(m["win_rate"]) for m in samples if np.isfinite(float(m["win_rate"]))]
+
+    return {
+        "median_cagr": float(np.median(cagr)) if cagr else math.nan,
+        "median_max_drawdown": float(np.median(mdd)) if mdd else math.nan,
+        "median_sharpe": float(np.median(sharpe)) if sharpe else math.nan,
+        "median_win_rate": float(np.median(win_rate)) if win_rate else math.nan,
     }
 
 
 def train() -> None:
+    start_time = time.perf_counter()
+    deadline = start_time + TIME_BUDGET_SECONDS
+
+    rng = np.random.default_rng(DEFAULT_RANDOM_SEED)
     bundle = discover_bundle(DEFAULT_OUTPUT_DIR)
-    prices, folds = load_bundle(bundle)
+    prices_by_symbol = {symbol: load_prices(bundle.output_dir, symbol) for symbol in bundle.symbols}
 
-    fold_trade_r: list[list[float]] = []
-    fold_cagrs: list[float] = []
-    fold_mdds: list[float] = []
-    fold_sharpes: list[float] = []
-    fold_win_rates: list[float] = []
+    generalist_fold_trade_r: list[list[float]] = []
+    generalist_samples: list[dict[str, float | list[float]]] = []
+    specialist_fold_trade_r: list[list[float]] = []
+    specialist_samples: list[dict[str, float | list[float]]] = []
 
-    total_trades = 0
-    total_wins = 0
+    specialist_prices = prices_by_symbol[bundle.specialist_symbol]
+    cycles = 0
 
-    for fold in folds:
-        oos_slice = prices.loc[fold.oos_start : fold.oos_end]
-        if oos_slice.empty:
-            fold_trade_r.append([])
-            continue
+    while time.perf_counter() < deadline:
+        cycles += 1
 
-        metrics = evaluate_slice(oos_slice)
-        trade_r = metrics["trade_r"]
-        fold_trade_r.append(trade_r)
+        basket_size = min(GENERALIST_BASKET_SIZE, len(bundle.symbols))
+        basket = rng.choice(bundle.symbols, size=basket_size, replace=False)
 
-        total_trades += int(metrics["num_trades"])
-        total_wins += int(metrics["wins"])
+        for symbol in basket:
+            prices = prices_by_symbol[str(symbol)]
+            if len(prices) < MIN_WINDOW_BARS:
+                continue
 
-        for k, collector in [
-            ("cagr", fold_cagrs),
-            ("max_drawdown", fold_mdds),
-            ("sharpe", fold_sharpes),
-            ("win_rate", fold_win_rates),
-        ]:
-            value = float(metrics[k])
-            if np.isfinite(value):
-                collector.append(value)
+            for _ in range(GENERALIST_WINDOWS_PER_CYCLE):
+                if time.perf_counter() >= deadline:
+                    break
+                window = random_window(prices, rng)
+                metrics = evaluate_slice(window)
+                generalist_fold_trade_r.append(metrics["trade_r"])
+                generalist_samples.append(metrics)
 
-    score = score_from_oos_folds(fold_trade_r)
+        for window in specialist_regime_windows(specialist_prices, rng):
+            if time.perf_counter() >= deadline:
+                break
+            metrics = evaluate_slice(window)
+            specialist_fold_trade_r.append(metrics["trade_r"])
+            specialist_samples.append(metrics)
+
+    elapsed = time.perf_counter() - start_time
+
+    generalist_score = score_from_oos_folds(generalist_fold_trade_r)
+    specialist_score = score_from_oos_folds(specialist_fold_trade_r)
+
+    generalist_stats = collect_metrics(generalist_samples)
+    specialist_stats = collect_metrics(specialist_samples)
 
     print("Evaluation complete")
-    print(f"symbol                : {bundle.symbol}")
-    print(f"folds                 : {len(folds)}")
-    print(f"score_median_fold_sqn : {score:.6f}" if np.isfinite(score) else "score_median_fold_sqn : nan")
-    print(f"total_trades          : {total_trades}")
-    print(f"winning_trades        : {total_wins}")
-    if total_trades > 0:
-        print(f"win_rate              : {total_wins / total_trades:.2%}")
+    print(f"time_budget_seconds      : {TIME_BUDGET_SECONDS:.1f}")
+    print(f"elapsed_seconds          : {elapsed:.1f}")
+    print(f"cycles_completed         : {cycles}")
+    print(f"universe_size            : {len(bundle.symbols)}")
+    print(f"specialist_symbol        : {bundle.specialist_symbol}")
+    print(f"generalist_folds         : {len(generalist_fold_trade_r)}")
+    print(f"specialist_folds         : {len(specialist_fold_trade_r)}")
     print(
-        f"median_cagr           : {np.median(fold_cagrs):.2%}"
-        if fold_cagrs
-        else "median_cagr           : nan"
+        f"generalist_score_sqn     : {generalist_score:.6f}"
+        if np.isfinite(generalist_score)
+        else "generalist_score_sqn     : nan"
     )
     print(
-        f"median_max_drawdown   : {np.median(fold_mdds):.2%}"
-        if fold_mdds
-        else "median_max_drawdown   : nan"
+        f"specialist_score_sqn     : {specialist_score:.6f}"
+        if np.isfinite(specialist_score)
+        else "specialist_score_sqn     : nan"
     )
     print(
-        f"median_sharpe         : {np.median(fold_sharpes):.3f}"
-        if fold_sharpes
-        else "median_sharpe         : nan"
+        f"combined_score_sqn       : {np.nanmedian([generalist_score, specialist_score]):.6f}"
+        if np.isfinite(generalist_score) or np.isfinite(specialist_score)
+        else "combined_score_sqn       : nan"
     )
-    print(
-        f"median_fold_win_rate  : {np.median(fold_win_rates):.2%}"
-        if fold_win_rates
-        else "median_fold_win_rate  : nan"
-    )
+
+    for label, stats in (("generalist", generalist_stats), ("specialist", specialist_stats)):
+        print(
+            f"{label}_median_cagr      : {stats['median_cagr']:.2%}"
+            if np.isfinite(stats["median_cagr"])
+            else f"{label}_median_cagr      : nan"
+        )
+        print(
+            f"{label}_median_drawdown  : {stats['median_max_drawdown']:.2%}"
+            if np.isfinite(stats["median_max_drawdown"])
+            else f"{label}_median_drawdown  : nan"
+        )
+        print(
+            f"{label}_median_sharpe    : {stats['median_sharpe']:.3f}"
+            if np.isfinite(stats["median_sharpe"])
+            else f"{label}_median_sharpe    : nan"
+        )
+        print(
+            f"{label}_median_win_rate  : {stats['median_win_rate']:.2%}"
+            if np.isfinite(stats["median_win_rate"])
+            else f"{label}_median_win_rate  : nan"
+        )
 
 
 if __name__ == "__main__":
