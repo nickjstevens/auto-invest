@@ -97,8 +97,8 @@ def strategy_signals(prices: pd.DataFrame, config: StrategyConfig) -> pd.Series:
       - -1.0 = sell/exit
     """
     close = prices["Close"].astype(float)
-    ma_fast = close.rolling(config.fast_ma_bars, min_periods=config.fast_ma_bars).mean()
-    ma_slow = close.rolling(config.slow_ma_bars, min_periods=config.slow_ma_bars).mean()
+    ma_fast = close.ewm(span=config.fast_ma_bars, adjust=False, min_periods=config.fast_ma_bars).mean()
+    ma_slow = close.ewm(span=config.slow_ma_bars, adjust=False, min_periods=config.slow_ma_bars).mean()
     momentum = close.pct_change(config.momentum_bars)
 
     buy_signal = (ma_fast > ma_slow) & (momentum > config.momentum_threshold)
