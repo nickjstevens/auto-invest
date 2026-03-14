@@ -206,6 +206,7 @@ dependencies = [
     { name = "polygon-api-client" },
     { name = "pyportfolioopt" },
     { name = "quantstats" },
+    { name = "scikit-learn" },
     { name = "vectorbt", version = "0.28.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
     { name = "vectorbt", version = "0.28.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
     { name = "yfinance" },
@@ -223,6 +224,7 @@ requires-dist = [
     { name = "polygon-api-client", specifier = ">=1.16.3" },
     { name = "pyportfolioopt", specifier = ">=1.6.0" },
     { name = "quantstats", specifier = ">=0.0.81" },
+    { name = "scikit-learn", specifier = ">=1.8.0" },
     { name = "vectorbt", specifier = ">=0.28.2" },
     { name = "yfinance", specifier = ">=1.2.0" },
 ]

@@ -15,6 +15,7 @@ dependencies = [
     "polygon-api-client>=1.16.3",
     "pyportfolioopt>=1.6.0",
     "quantstats>=0.0.81",
+    "scikit-learn>=1.8.0",
     "vectorbt>=0.28.2",
     "yfinance>=1.2.0",
 ]
