@@ -1,6 +1,6 @@
 # autoresearch
 
-This is an experiment to have the LLM do its own research.
+This is an experiment to have the LLM do its own research and optimise a trading strategy.
 
 ## Setup
 
@@ -11,8 +11,8 @@ To set up a new experiment, work with the user to:
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
    - `prepare.py` — fixed constants, data prep, dataloader, evaluation. Do not modify.
-   - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-4. **Verify data exists**: Check that `~/.cache/auto-invest/` contains data. If not, tell the human to run `uv run prepare.py`.
+   - `train.py` — the file you modify. Model architecture, trading strategy, training loop.
+4. **Verify data exists**: Check that `~/.cache/auto-invest/prep` contains data. If not, tell the human to run `uv run prepare.py`. The file `prep_universe.json` summarises the data available. 
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 6. **Confirm and go**: Confirm setup looks good.
 
@@ -23,23 +23,18 @@ Once you get confirmation, kick off the experimentation.
 Each experiment runs on a single computer. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
 
 **What you CAN do:**
-- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
+- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, trading strategy, hyperparameters, model size, use of indicators (moving averages, RSI, ichimoku, momentum, etc).
 
 **What you CANNOT do:**
-- Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, and training constants (time budget, sequence length, etc).
+- Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, and training constants (time budget, etc).
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
+- Modify the evaluation harness. The `score_from_oos_folds` function in `prepare.py` is the ground truth metric.
 
+**The goal is simple: get the highest combined_score_sqn.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the strategy, the hyperparameters, the model, the indicators, create composite indicators, etc. The only constraint is that the code runs without crashing and finishes within the time budget.
 
-TODO
-- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
+**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 combined_score_sqn improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 combined_score_sqn improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
 
-**The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
-
-**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
-
-**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
-
-**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
+**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is (a moving average cross strategy).
 
 ## Output format
 
@@ -47,23 +42,30 @@ Once the script finishes it prints a summary like this:
 
 ```
 ---
-val_bpb:          0.997900
-training_seconds: 300.1
-total_seconds:    325.9
-peak_vram_mb:     45060.2
-mfu_percent:      39.80
-total_tokens_M:   499.6
-num_steps:        953
-num_params_M:     50.3
-depth:            8
+Evaluation complete
+time_budget_seconds      : 300.0
+elapsed_seconds          : 300.0
+cycles_completed         : 61
+universe_size            : 32
+combined_folds           : 23372
+valid_folds_for_sqn      : 18714
+min_valid_folds_required : 25
+combined_score_sqn       : 0.278988
+combined_median_cagr     : 0.39%
+combined_median_drawdown : -9.73%
+combined_median_sharpe   : 0.150
+combined_median_win_rate : 38.46%
+combined_median_trade_r  : -0.200R
+median_trade_open_bars   : 6.0
+median_trade_open_days   : 7.0
 ```
 
 Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metric from the log file:
 
 ```
-grep "^val_bpb:" run.log
+grep "^combined_score_sqn:" run.log
 ```
-
+#TODO
 ## Logging results
 
 When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
