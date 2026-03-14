@@ -37,7 +37,6 @@ from prepare import (
 
 DEFAULT_RISK_FRACTION = 0.02
 TIME_BUDGET_SECONDS = float(os.getenv("TIME_BUDGET_SECONDS", "300"))
-RUN_LOG_PATH = os.getenv("RUN_LOG_PATH", "run.log")
 
 
 @dataclass(frozen=True)
@@ -279,18 +278,6 @@ def collect_metrics(samples: list[dict[str, float | list[float]]]) -> dict[str, 
     }
 
 
-def emit_summary(lines: list[str], run_log_path: str) -> None:
-    """Print summary lines to stdout and persist the same output to run.log."""
-    for line in lines:
-        print(line)
-
-    run_log_dir = os.path.dirname(run_log_path)
-    if run_log_dir:
-        os.makedirs(run_log_dir, exist_ok=True)
-
-    with open(run_log_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-
 def train() -> None:
     start_time = time.perf_counter()
     deadline = start_time + TIME_BUDGET_SECONDS
@@ -382,7 +369,8 @@ def train() -> None:
         ),
     ]
 
-    emit_summary(lines, RUN_LOG_PATH)
+    for line in lines:
+        print(line)
 
 
 if __name__ == "__main__":
