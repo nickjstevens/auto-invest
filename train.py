@@ -168,12 +168,19 @@ def collect_metrics(samples: list[dict[str, float | list[float]]]) -> dict[str, 
     mdd = [float(m["max_drawdown"]) for m in samples if np.isfinite(float(m["max_drawdown"]))]
     sharpe = [float(m["sharpe"]) for m in samples if np.isfinite(float(m["sharpe"]))]
     win_rate = [float(m["win_rate"]) for m in samples if np.isfinite(float(m["win_rate"]))]
+    trade_r = [
+        float(r)
+        for sample in samples
+        for r in sample["trade_r"]
+        if np.isfinite(float(r))
+    ]
 
     return {
         "median_cagr": float(np.median(cagr)) if cagr else math.nan,
         "median_max_drawdown": float(np.median(mdd)) if mdd else math.nan,
         "median_sharpe": float(np.median(sharpe)) if sharpe else math.nan,
         "median_win_rate": float(np.median(win_rate)) if win_rate else math.nan,
+        "median_trade_r": float(np.median(trade_r)) if trade_r else math.nan,
     }
 
 
@@ -243,6 +250,11 @@ def train() -> None:
         f"combined_median_win_rate : {combined_stats['median_win_rate']:.2%}"
         if np.isfinite(combined_stats["median_win_rate"])
         else "combined_median_win_rate : nan"
+    )
+    print(
+        f"combined_median_trade_r  : {combined_stats['median_trade_r']:.3f}R"
+        if np.isfinite(combined_stats["median_trade_r"])
+        else "combined_median_trade_r  : nan"
     )
 
 
