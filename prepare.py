@@ -19,7 +19,8 @@ import argparse
 import json
 import math
 import os
-from typing import Iterable, Sequence
+import time
+from typing import Callable, Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -136,6 +137,46 @@ def score_from_oos_folds(
     raw_median = float(np.median(per_fold_sqn))
     fold_confidence = float(np.sqrt(valid_folds / (valid_folds + fold_shrinkage)))
     return raw_median * fold_confidence
+
+
+def run_time_budgeted_evaluation_loop(
+    *,
+    symbols: Sequence[str],
+    prices_by_symbol: dict[str, pd.DataFrame],
+    deadline: float,
+    rng: np.random.Generator,
+    min_window_bars: int,
+    generalist_basket_size: int,
+    generalist_windows_per_cycle: int,
+    random_window_fn: Callable[[pd.DataFrame, np.random.Generator], pd.DataFrame],
+    evaluate_slice_fn: Callable[[pd.DataFrame], dict[str, float | list[float]]],
+) -> tuple[list[list[float]], list[dict[str, float | list[float]]], int]:
+    """Run the shared time-budgeted random-window evaluation loop."""
+    combined_fold_trade_r: list[list[float]] = []
+    combined_samples: list[dict[str, float | list[float]]] = []
+    cycles = 0
+
+    while time.perf_counter() < deadline:
+        cycles += 1
+
+        basket_size = min(generalist_basket_size, len(symbols))
+        basket = rng.choice(symbols, size=basket_size, replace=False)
+
+        for symbol in basket:
+            prices = prices_by_symbol[str(symbol)]
+            if len(prices) < min_window_bars:
+                continue
+
+            for _ in range(generalist_windows_per_cycle):
+                if time.perf_counter() >= deadline:
+                    break
+
+                window = random_window_fn(prices, rng)
+                metrics = evaluate_slice_fn(window)
+                combined_fold_trade_r.append(metrics["trade_r"])
+                combined_samples.append(metrics)
+
+    return combined_fold_trade_r, combined_samples, cycles
 
 
 def save_preparation_bundle(
