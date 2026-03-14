@@ -37,6 +37,7 @@ from prepare import (
 
 DEFAULT_RISK_FRACTION = 0.02
 TIME_BUDGET_SECONDS = float(os.getenv("TIME_BUDGET_SECONDS", "300"))
+RUN_LOG_PATH = os.getenv("RUN_LOG_PATH", "run.log")
 
 
 @dataclass(frozen=True)
@@ -278,6 +279,18 @@ def collect_metrics(samples: list[dict[str, float | list[float]]]) -> dict[str, 
     }
 
 
+def emit_summary(lines: list[str], run_log_path: str) -> None:
+    """Print summary lines to stdout and persist the same output to run.log."""
+    for line in lines:
+        print(line)
+
+    run_log_dir = os.path.dirname(run_log_path)
+    if run_log_dir:
+        os.makedirs(run_log_dir, exist_ok=True)
+
+    with open(run_log_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
 def train() -> None:
     start_time = time.perf_counter()
     deadline = start_time + TIME_BUDGET_SECONDS
@@ -318,54 +331,58 @@ def train() -> None:
     combined_score = score_from_oos_folds(combined_fold_trade_r)
     combined_stats = collect_metrics(combined_samples)
 
-    print("Evaluation complete")
-    print(f"time_budget_seconds      : {TIME_BUDGET_SECONDS:.1f}")
-    print(f"elapsed_seconds          : {elapsed:.1f}")
-    print(f"cycles_completed         : {cycles}")
-    print(f"universe_size            : {len(bundle.symbols)}")
-    print(f"combined_folds           : {len(combined_fold_trade_r)}")
-    print(f"valid_folds_for_sqn      : {valid_folds}")
-    print(f"min_valid_folds_required : {MIN_VALID_FOLDS}")
-    print(
-        f"combined_score_sqn       : {combined_score:.6f}"
-        if np.isfinite(combined_score)
-        else "combined_score_sqn       : nan"
-    )
-    print(
-        f"combined_median_cagr     : {combined_stats['median_cagr']:.2%}"
-        if np.isfinite(combined_stats["median_cagr"])
-        else "combined_median_cagr     : nan"
-    )
-    print(
-        f"combined_median_drawdown : {combined_stats['median_max_drawdown']:.2%}"
-        if np.isfinite(combined_stats["median_max_drawdown"])
-        else "combined_median_drawdown : nan"
-    )
-    print(
-        f"combined_median_sharpe   : {combined_stats['median_sharpe']:.3f}"
-        if np.isfinite(combined_stats["median_sharpe"])
-        else "combined_median_sharpe   : nan"
-    )
-    print(
-        f"combined_median_win_rate : {combined_stats['median_win_rate']:.2%}"
-        if np.isfinite(combined_stats["median_win_rate"])
-        else "combined_median_win_rate : nan"
-    )
-    print(
-        f"combined_median_trade_r  : {combined_stats['median_trade_r']:.3f}R"
-        if np.isfinite(combined_stats["median_trade_r"])
-        else "combined_median_trade_r  : nan"
-    )
-    print(
-        f"median_trade_open_bars   : {combined_stats['median_trade_duration_bars']:.1f}"
-        if np.isfinite(combined_stats["median_trade_duration_bars"])
-        else "median_trade_open_bars   : nan"
-    )
-    print(
-        f"median_trade_open_days   : {combined_stats['median_trade_duration_days']:.1f}"
-        if np.isfinite(combined_stats["median_trade_duration_days"])
-        else "median_trade_open_days   : nan"
-    )
+    lines = [
+        "Evaluation complete",
+        f"time_budget_seconds      : {TIME_BUDGET_SECONDS:.1f}",
+        f"elapsed_seconds          : {elapsed:.1f}",
+        f"cycles_completed         : {cycles}",
+        f"universe_size            : {len(bundle.symbols)}",
+        f"combined_folds           : {len(combined_fold_trade_r)}",
+        f"valid_folds_for_sqn      : {valid_folds}",
+        f"min_valid_folds_required : {MIN_VALID_FOLDS}",
+        (
+            f"combined_score_sqn       : {combined_score:.6f}"
+            if np.isfinite(combined_score)
+            else "combined_score_sqn       : nan"
+        ),
+        (
+            f"combined_median_cagr     : {combined_stats['median_cagr']:.2%}"
+            if np.isfinite(combined_stats["median_cagr"])
+            else "combined_median_cagr     : nan"
+        ),
+        (
+            f"combined_median_drawdown : {combined_stats['median_max_drawdown']:.2%}"
+            if np.isfinite(combined_stats["median_max_drawdown"])
+            else "combined_median_drawdown : nan"
+        ),
+        (
+            f"combined_median_sharpe   : {combined_stats['median_sharpe']:.3f}"
+            if np.isfinite(combined_stats["median_sharpe"])
+            else "combined_median_sharpe   : nan"
+        ),
+        (
+            f"combined_median_win_rate : {combined_stats['median_win_rate']:.2%}"
+            if np.isfinite(combined_stats["median_win_rate"])
+            else "combined_median_win_rate : nan"
+        ),
+        (
+            f"combined_median_trade_r  : {combined_stats['median_trade_r']:.3f}R"
+            if np.isfinite(combined_stats["median_trade_r"])
+            else "combined_median_trade_r  : nan"
+        ),
+        (
+            f"median_trade_open_bars   : {combined_stats['median_trade_duration_bars']:.1f}"
+            if np.isfinite(combined_stats["median_trade_duration_bars"])
+            else "median_trade_open_bars   : nan"
+        ),
+        (
+            f"median_trade_open_days   : {combined_stats['median_trade_duration_days']:.1f}"
+            if np.isfinite(combined_stats["median_trade_duration_days"])
+            else "median_trade_open_days   : nan"
+        ),
+    ]
+
+    emit_summary(lines, RUN_LOG_PATH)
 
 
 if __name__ == "__main__":
