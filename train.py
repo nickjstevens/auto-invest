@@ -30,14 +30,12 @@ from prepare import (
     MIN_WINDOW_BARS,
     MIN_TRADES_PER_FOLD,
     MIN_VALID_FOLDS,
+    TIME_BUDGET_SECONDS,
     run_time_budgeted_evaluation_loop,
     score_from_oos_folds,
 )
 
-
 DEFAULT_RISK_FRACTION = 0.02
-TIME_BUDGET_SECONDS = float(os.getenv("TIME_BUDGET_SECONDS", "300"))
-
 
 @dataclass(frozen=True)
 class Bundle:

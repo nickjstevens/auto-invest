@@ -23,7 +23,7 @@ Once you get confirmation, kick off the experimentation.
 Each experiment runs on a single computer. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
 
 **What you CAN do:**
-- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, trading strategy, hyperparameters, model size, use of indicators (moving averages, RSI, ichimoku, momentum, etc).
+- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, trading strategy, hyperparameters, model size, use of indicators (moving averages, RSI, ichimoku, momentum, candlestick patterns, etc).
 
 **What you CANNOT do:**
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, and training constants (time budget, etc).
