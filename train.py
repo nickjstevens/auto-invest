@@ -37,6 +37,7 @@ class TrendFollowingStrategy(Strategy):
         slow_ma_bars: int = 200,
         momentum_bars: int = 20,
         momentum_threshold: float = 0.0,
+        breakout_bars: int = 10,
         rsi_bars: int = 14,
         rsi_entry_min: float = 55.0,
         rsi_entry_max: float = 70.0,
@@ -51,6 +52,7 @@ class TrendFollowingStrategy(Strategy):
         self.slow_ma_bars = slow_ma_bars
         self.momentum_bars = momentum_bars
         self.momentum_threshold = momentum_threshold
+        self.breakout_bars = breakout_bars
         self.rsi_bars = rsi_bars
         self.rsi_entry_min = rsi_entry_min
         self.rsi_entry_max = rsi_entry_max
@@ -71,12 +73,14 @@ class TrendFollowingStrategy(Strategy):
         avg_loss = losses.rolling(self.rsi_bars, min_periods=self.rsi_bars).mean()
         rs = avg_gain / avg_loss.replace(0.0, np.nan)
         rsi = 100.0 - (100.0 / (1.0 + rs))
+        breakout_level = close.shift(1).rolling(self.breakout_bars, min_periods=self.breakout_bars).max()
 
         buy_signal = (
             (ma_fast > ma_slow)
             & (momentum > self.momentum_threshold)
             & (rsi >= self.rsi_entry_min)
             & (rsi <= self.rsi_entry_max)
+            & (close > breakout_level)
         )
         sell_signal = (ma_fast < ma_slow) | (momentum < -self.momentum_threshold) | (rsi < self.rsi_exit_threshold)
 
@@ -133,6 +137,7 @@ def train() -> None:
         slow_ma_bars=200,
         momentum_bars=20,
         momentum_threshold=0.02,
+        breakout_bars=10,
         rsi_bars=14,
         rsi_entry_min=55.0,
         rsi_entry_max=70.0,
