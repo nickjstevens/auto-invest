@@ -88,7 +88,7 @@ class TrendFollowingStrategy(Strategy):
             & (rsi <= self.rsi_entry_max)
             & (close > breakout_level)
         )
-        sell_signal = (ma_fast < ma_slow) | (momentum < -self.momentum_threshold) | (rsi < self.rsi_exit_threshold)
+        sell_signal = (ma_fast < ma_slow) | (rsi < self.rsi_exit_threshold)
 
         signal = pd.Series(0.0, index=prices.index, dtype=float)
         signal = signal.mask(buy_signal, 1.0)
