@@ -10,12 +10,9 @@ for optimisation.
 """
 
 from __future__ import annotations
-
 import time
-
 import numpy as np
 import pandas as pd
-
 from prepare import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_RANDOM_SEED,
