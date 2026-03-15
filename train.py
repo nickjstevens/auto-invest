@@ -48,13 +48,7 @@ class StrategyConfig:
     fast_ma_bars: int = 20
     slow_ma_bars: int = 200
     momentum_bars: int = 20
-    breakout_bars: int = 20
-    bollinger_bars: int = 20
-    trend_rsi_bars: int = 14
-    short_rsi_bars: int = 3
-    pullback_rsi_threshold: float = 18.0
-    pullback_zscore_threshold: float = -1.0
-    breakout_rsi_threshold: float = 55.0
+    momentum_threshold: float = 0.0
     position_size: float = 1.0
     stop_loss_pct: float = 0.08
     trailing_stop_pct: float = 0.12
@@ -93,50 +87,23 @@ def load_prices(output_dir: str, symbol: str) -> pd.DataFrame:
     return prices.sort_index()
 
 
-def ema(series: pd.Series, bars: int) -> pd.Series:
-    return series.ewm(span=bars, adjust=False, min_periods=bars).mean()
-
-
-def rsi(series: pd.Series, bars: int) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0.0)
-    loss = -delta.clip(upper=0.0)
-    avg_gain = gain.ewm(alpha=1.0 / bars, adjust=False, min_periods=bars).mean()
-    avg_loss = loss.ewm(alpha=1.0 / bars, adjust=False, min_periods=bars).mean()
-    rs = avg_gain / avg_loss.replace(0.0, np.nan)
-    return 100.0 - (100.0 / (1.0 + rs))
-
-
 def strategy_signals(prices: pd.DataFrame, config: StrategyConfig) -> pd.Series:
+    """
+    Strategy hook that outputs discrete actions:
+      -  1.0 = buy/enter long
+      -  0.0 = hold
+      - -1.0 = sell/exit
+    """
     close = prices["Close"].astype(float)
-    high = prices["High"].astype(float)
     ma_fast = close.rolling(config.fast_ma_bars, min_periods=config.fast_ma_bars).mean()
     ma_slow = close.rolling(config.slow_ma_bars, min_periods=config.slow_ma_bars).mean()
     momentum = close.pct_change(config.momentum_bars)
-    trend_rsi = rsi(close, config.trend_rsi_bars)
-    short_rsi = rsi(close, config.short_rsi_bars)
-    bb_mid = close.rolling(config.bollinger_bars, min_periods=config.bollinger_bars).mean()
-    bb_std = close.rolling(config.bollinger_bars, min_periods=config.bollinger_bars).std(ddof=0)
-    bb_zscore = (close - bb_mid) / bb_std.replace(0.0, np.nan)
-    breakout_high = high.rolling(config.breakout_bars, min_periods=config.breakout_bars).max().shift(1)
 
-    trend_entry = (ma_fast > ma_slow) & (momentum > 0.0) & (trend_rsi > 50.0)
-    breakout_entry = trend_entry & (close > breakout_high) & (trend_rsi > config.breakout_rsi_threshold)
-    pullback_entry = (
-        (close > ma_slow)
-        & (ma_fast > ma_slow)
-        & (momentum > -0.03)
-        & (short_rsi < config.pullback_rsi_threshold)
-        & (bb_zscore < config.pullback_zscore_threshold)
-    )
-    sell_signal = (
-        (ma_fast < ma_slow)
-        | (momentum < -0.03)
-        | ((short_rsi > 90.0) & (bb_zscore > 1.25))
-    )
+    buy_signal = (ma_fast > ma_slow) & (momentum > config.momentum_threshold)
+    sell_signal = (ma_fast < ma_slow) | (momentum < -config.momentum_threshold)
 
     signal = pd.Series(0.0, index=prices.index, dtype=float)
-    signal = signal.mask(trend_entry | breakout_entry | pullback_entry, 1.0)
+    signal = signal.mask(buy_signal, 1.0)
     signal = signal.mask(sell_signal, -1.0)
     return signal.rename("signal")
 
@@ -321,16 +288,10 @@ def train() -> None:
     prices_by_symbol = {symbol: load_prices(bundle.output_dir, symbol) for symbol in bundle.symbols}
 
     strategy_config = StrategyConfig(
-        fast_ma_bars=20,
+        fast_ma_bars=15,
         slow_ma_bars=200,
-        momentum_bars=20,
-        breakout_bars=20,
-        bollinger_bars=20,
-        trend_rsi_bars=14,
-        short_rsi_bars=3,
-        pullback_rsi_threshold=18.0,
-        pullback_zscore_threshold=-1.0,
-        breakout_rsi_threshold=55.0,
+        momentum_bars=15,
+        momentum_threshold=0.0,
         position_size=1.0,
         stop_loss_pct=0.08,
         trailing_stop_pct=0.12,
