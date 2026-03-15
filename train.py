@@ -37,6 +37,10 @@ class TrendFollowingStrategy(Strategy):
         slow_ma_bars: int = 200,
         momentum_bars: int = 20,
         momentum_threshold: float = 0.0,
+        rsi_bars: int = 14,
+        rsi_entry_min: float = 55.0,
+        rsi_entry_max: float = 70.0,
+        rsi_exit_threshold: float = 45.0,
         position_size: float = 1.0,
         stop_loss_pct: float = 0.08,
         trailing_stop_pct: float = 0.12,
@@ -47,6 +51,10 @@ class TrendFollowingStrategy(Strategy):
         self.slow_ma_bars = slow_ma_bars
         self.momentum_bars = momentum_bars
         self.momentum_threshold = momentum_threshold
+        self.rsi_bars = rsi_bars
+        self.rsi_entry_min = rsi_entry_min
+        self.rsi_entry_max = rsi_entry_max
+        self.rsi_exit_threshold = rsi_exit_threshold
         self.position_size = position_size
         self.stop_loss_pct = stop_loss_pct
         self.trailing_stop_pct = trailing_stop_pct
@@ -56,9 +64,21 @@ class TrendFollowingStrategy(Strategy):
         ma_fast = close.rolling(self.fast_ma_bars, min_periods=self.fast_ma_bars).mean()
         ma_slow = close.rolling(self.slow_ma_bars, min_periods=self.slow_ma_bars).mean()
         momentum = close.pct_change(self.momentum_bars)
+        delta = close.diff()
+        gains = delta.clip(lower=0.0)
+        losses = (-delta).clip(lower=0.0)
+        avg_gain = gains.rolling(self.rsi_bars, min_periods=self.rsi_bars).mean()
+        avg_loss = losses.rolling(self.rsi_bars, min_periods=self.rsi_bars).mean()
+        rs = avg_gain / avg_loss.replace(0.0, np.nan)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
 
-        buy_signal = (ma_fast > ma_slow) & (momentum > self.momentum_threshold)
-        sell_signal = (ma_fast < ma_slow) | (momentum < -self.momentum_threshold)
+        buy_signal = (
+            (ma_fast > ma_slow)
+            & (momentum > self.momentum_threshold)
+            & (rsi >= self.rsi_entry_min)
+            & (rsi <= self.rsi_entry_max)
+        )
+        sell_signal = (ma_fast < ma_slow) | (momentum < -self.momentum_threshold) | (rsi < self.rsi_exit_threshold)
 
         signal = pd.Series(0.0, index=prices.index, dtype=float)
         signal = signal.mask(buy_signal, 1.0)
@@ -113,6 +133,10 @@ def train() -> None:
         slow_ma_bars=200,
         momentum_bars=20,
         momentum_threshold=0.02,
+        rsi_bars=14,
+        rsi_entry_min=55.0,
+        rsi_entry_max=70.0,
+        rsi_exit_threshold=45.0,
         position_size=1.0,
         stop_loss_pct=0.08,
         trailing_stop_pct=0.12,
