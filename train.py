@@ -109,9 +109,9 @@ def train() -> None:
     prices_by_symbol = {symbol: load_prices(bundle.output_dir, symbol) for symbol in bundle.symbols}
 
     strategy = TrendFollowingStrategy(
-        fast_ma_bars=15,
+        fast_ma_bars=20,
         slow_ma_bars=200,
-        momentum_bars=15,
+        momentum_bars=20,
         momentum_threshold=0.0,
         position_size=1.0,
         stop_loss_pct=0.08,
