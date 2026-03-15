@@ -137,7 +137,7 @@ def train() -> None:
         slow_ma_bars=200,
         momentum_bars=20,
         momentum_threshold=0.02,
-        breakout_bars=10,
+        breakout_bars=20,
         rsi_bars=14,
         rsi_entry_min=55.0,
         rsi_entry_max=70.0,
