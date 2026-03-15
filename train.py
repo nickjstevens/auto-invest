@@ -112,7 +112,7 @@ def train() -> None:
         fast_ma_bars=20,
         slow_ma_bars=200,
         momentum_bars=20,
-        momentum_threshold=0.0,
+        momentum_threshold=0.02,
         position_size=1.0,
         stop_loss_pct=0.08,
         trailing_stop_pct=0.12,
