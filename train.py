@@ -37,6 +37,14 @@ class TrendFollowingStrategy(Strategy):
         slow_ma_bars: int = 200,
         momentum_bars: int = 20,
         momentum_threshold: float = 0.0,
+        breakout_bars: int = 10,
+        rsi_bars: int = 14,
+        rsi_entry_min: float = 55.0,
+        rsi_entry_max: float = 70.0,
+        rsi_exit_threshold: float = 45.0,
+        atr_bars: int = 14,
+        atr_stop_mult: float = 2.5,
+        atr_trail_mult: float = 3.0,
         position_size: float = 1.0,
         stop_loss_pct: float = 0.08,
         trailing_stop_pct: float = 0.12,
@@ -47,6 +55,14 @@ class TrendFollowingStrategy(Strategy):
         self.slow_ma_bars = slow_ma_bars
         self.momentum_bars = momentum_bars
         self.momentum_threshold = momentum_threshold
+        self.breakout_bars = breakout_bars
+        self.rsi_bars = rsi_bars
+        self.rsi_entry_min = rsi_entry_min
+        self.rsi_entry_max = rsi_entry_max
+        self.rsi_exit_threshold = rsi_exit_threshold
+        self.atr_bars = atr_bars
+        self.atr_stop_mult = atr_stop_mult
+        self.atr_trail_mult = atr_trail_mult
         self.position_size = position_size
         self.stop_loss_pct = stop_loss_pct
         self.trailing_stop_pct = trailing_stop_pct
@@ -56,9 +72,23 @@ class TrendFollowingStrategy(Strategy):
         ma_fast = close.rolling(self.fast_ma_bars, min_periods=self.fast_ma_bars).mean()
         ma_slow = close.rolling(self.slow_ma_bars, min_periods=self.slow_ma_bars).mean()
         momentum = close.pct_change(self.momentum_bars)
+        delta = close.diff()
+        gains = delta.clip(lower=0.0)
+        losses = (-delta).clip(lower=0.0)
+        avg_gain = gains.rolling(self.rsi_bars, min_periods=self.rsi_bars).mean()
+        avg_loss = losses.rolling(self.rsi_bars, min_periods=self.rsi_bars).mean()
+        rs = avg_gain / avg_loss.replace(0.0, np.nan)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        breakout_level = close.shift(1).rolling(self.breakout_bars, min_periods=self.breakout_bars).max()
 
-        buy_signal = (ma_fast > ma_slow) & (momentum > self.momentum_threshold)
-        sell_signal = (ma_fast < ma_slow) | (momentum < -self.momentum_threshold)
+        buy_signal = (
+            (ma_fast > ma_slow)
+            & (momentum > self.momentum_threshold)
+            & (rsi >= self.rsi_entry_min)
+            & (rsi <= self.rsi_entry_max)
+            & (close > breakout_level)
+        )
+        sell_signal = (ma_fast < ma_slow) | (rsi < self.rsi_exit_threshold)
 
         signal = pd.Series(0.0, index=prices.index, dtype=float)
         signal = signal.mask(buy_signal, 1.0)
@@ -66,35 +96,51 @@ class TrendFollowingStrategy(Strategy):
         return signal.rename("signal")
 
     def signal_to_position(self, prices: pd.DataFrame, signal: pd.Series) -> pd.Series:
+        high = prices["High"].astype(float)
         close = prices["Close"].astype(float)
         low = prices["Low"].astype(float)
+        tr = pd.concat(
+            [
+                high - low,
+                (high - close.shift(1)).abs(),
+                (low - close.shift(1)).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        atr = tr.rolling(self.atr_bars, min_periods=self.atr_bars).mean()
 
         position = pd.Series(0.0, index=prices.index, dtype=float)
         in_trade = False
         entry_price = float("nan")
         highest_close = float("nan")
+        entry_atr = float("nan")
 
         for i in range(len(prices)):
             if in_trade:
-                stop_hit = low.iloc[i] <= entry_price * (1.0 - self.stop_loss_pct)
+                current_atr = float(atr.iloc[i]) if np.isfinite(float(atr.iloc[i])) else entry_atr
+                stop_price = entry_price - self.atr_stop_mult * entry_atr
+                stop_hit = low.iloc[i] <= stop_price
                 highest_close = max(highest_close, float(close.iloc[i]))
-                trailing_stop_hit = close.iloc[i] <= highest_close * (1.0 - self.trailing_stop_pct)
+                trailing_stop = highest_close - self.atr_trail_mult * current_atr
+                trailing_stop_hit = close.iloc[i] <= trailing_stop
                 explicit_exit = signal.iloc[i] < 0
 
                 if stop_hit or trailing_stop_hit or explicit_exit:
                     in_trade = False
                     entry_price = float("nan")
                     highest_close = float("nan")
+                    entry_atr = float("nan")
                     position.iloc[i] = 0.0
                     continue
 
                 position.iloc[i] = self.position_size
                 continue
 
-            if signal.iloc[i] > 0:
+            if signal.iloc[i] > 0 and np.isfinite(float(atr.iloc[i])):
                 in_trade = True
                 entry_price = float(close.iloc[i])
                 highest_close = entry_price
+                entry_atr = float(atr.iloc[i])
                 position.iloc[i] = self.position_size
 
         return position.rename("position")
@@ -109,10 +155,18 @@ def train() -> None:
     prices_by_symbol = {symbol: load_prices(bundle.output_dir, symbol) for symbol in bundle.symbols}
 
     strategy = TrendFollowingStrategy(
-        fast_ma_bars=15,
+        fast_ma_bars=20,
         slow_ma_bars=200,
-        momentum_bars=15,
-        momentum_threshold=0.0,
+        momentum_bars=20,
+        momentum_threshold=0.02,
+        breakout_bars=20,
+        rsi_bars=14,
+        rsi_entry_min=45.0,
+        rsi_entry_max=70.0,
+        rsi_exit_threshold=45.0,
+        atr_bars=14,
+        atr_stop_mult=2.5,
+        atr_trail_mult=3.0,
         position_size=1.0,
         stop_loss_pct=0.08,
         trailing_stop_pct=0.12,

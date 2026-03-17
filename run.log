@@ -1,0 +1,16 @@
+Evaluation complete
+time_budget_seconds      : 60.0
+elapsed_seconds          : 60.0
+cycles_completed         : 3
+universe_size            : 32
+combined_folds           : 864
+valid_folds_for_sqn      : 507
+min_valid_folds_required : 25
+combined_score_sqn       : 0.732854
+combined_median_cagr     : 1.92%
+combined_median_drawdown : -8.65%
+combined_median_sharpe   : 0.359
+combined_median_win_rate : 50.00%
+combined_median_trade_r  : -0.186R
+median_trade_open_bars   : 18.0
+median_trade_open_days   : 24.0
