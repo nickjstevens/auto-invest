@@ -1,0 +1,101 @@
+//@version=6
+strategy(
+    "Auto-Invest Best Strategy",
+    shorttitle="AI Breakout ATR",
+    overlay=true,
+    pyramiding=0,
+    initial_capital=100000,
+    commission_type=strategy.commission.percent,
+    commission_value=0.02,
+    default_qty_type=strategy.percent_of_equity,
+    default_qty_value=100,
+    process_orders_on_close=true
+)
+
+// Mirrors the hard-coded best strategy in train.py / results.tsv row 4e50531.
+// Use on daily bars. Orders are processed on the close to stay close to the Python
+// backtest, which applies returns from the next bar after a close-based signal.
+// The ATR stop rules are implemented as exit conditions on the bar close to match
+// the original evaluation logic rather than using native intrabar stop fills.
+
+fastMaBars = input.int(20, "Fast SMA Bars", minval=1)
+slowMaBars = input.int(200, "Slow SMA Bars", minval=1)
+momentumBars = input.int(20, "Momentum Bars", minval=1)
+momentumThreshold = input.float(0.02, "Momentum Threshold", step=0.001)
+breakoutBars = input.int(20, "Breakout Bars", minval=1)
+rsiBars = input.int(14, "RSI Bars", minval=1)
+rsiEntryMin = input.float(45.0, "RSI Entry Min", step=0.1)
+rsiEntryMax = input.float(70.0, "RSI Entry Max", step=0.1)
+rsiExitThreshold = input.float(45.0, "RSI Exit Threshold", step=0.1)
+atrBars = input.int(14, "ATR Bars", minval=1)
+atrStopMult = input.float(2.5, "ATR Initial Stop Mult", step=0.1)
+atrTrailMult = input.float(3.0, "ATR Trail Mult", step=0.1)
+
+simpleRsi(src, length) =>
+    delta = ta.change(src)
+    gains = math.max(delta, 0.0)
+    losses = math.max(-delta, 0.0)
+    avgGain = ta.sma(gains, length)
+    avgLoss = ta.sma(losses, length)
+    rs = not na(avgLoss) and avgLoss != 0.0 ? avgGain / avgLoss : na
+    100.0 - (100.0 / (1.0 + rs))
+
+prevClose = close[1]
+tr = na(prevClose) ? high - low : math.max(high - low, math.max(math.abs(high - prevClose), math.abs(low - prevClose)))
+atr = ta.sma(tr, atrBars)
+
+maFast = ta.sma(close, fastMaBars)
+maSlow = ta.sma(close, slowMaBars)
+momentum = not na(close[momentumBars]) ? close / close[momentumBars] - 1.0 : na
+rsi = simpleRsi(close, rsiBars)
+breakoutLevel = ta.highest(close[1], breakoutBars)
+
+entrySignal = maFast > maSlow and momentum > momentumThreshold and rsi >= rsiEntryMin and rsi <= rsiEntryMax and close > breakoutLevel
+explicitExitSignal = maFast < maSlow or rsi < rsiExitThreshold
+
+var bool inTrade = false
+var float entryPrice = na
+var float highestClose = na
+var float entryAtr = na
+var float activeFixedStop = na
+var float activeTrailingStop = na
+
+if barstate.isconfirmed
+    if inTrade
+        currentAtr = na(atr) ? entryAtr : atr
+        activeFixedStop := entryPrice - atrStopMult * entryAtr
+        highestClose := math.max(highestClose, close)
+        activeTrailingStop := highestClose - atrTrailMult * currentAtr
+
+        stopHit = low <= activeFixedStop
+        trailingStopHit = close <= activeTrailingStop
+        exitSignal = stopHit or trailingStopHit or explicitExitSignal
+
+        if exitSignal
+            if stopHit
+                strategy.close("Long", comment="ATR initial stop")
+            else if trailingStopHit
+                strategy.close("Long", comment="ATR trailing stop")
+            else
+                strategy.close("Long", comment="Trend/RSI exit")
+
+            inTrade := false
+            entryPrice := na
+            highestClose := na
+            entryAtr := na
+            activeFixedStop := na
+            activeTrailingStop := na
+    else if entrySignal and not na(atr)
+        strategy.entry("Long", strategy.long, comment="Breakout entry")
+        inTrade := true
+        entryPrice := close
+        highestClose := close
+        entryAtr := atr
+        activeFixedStop := entryPrice - atrStopMult * entryAtr
+        activeTrailingStop := highestClose - atrTrailMult * entryAtr
+
+plot(maFast, "Fast SMA", color=color.new(color.teal, 0), linewidth=2)
+plot(maSlow, "Slow SMA", color=color.new(color.orange, 0), linewidth=2)
+plot(breakoutLevel, "Breakout Level", color=color.new(color.blue, 60))
+plot(activeFixedStop, "Fixed ATR Stop", color=color.new(color.red, 0), style=plot.style_linebr)
+plot(activeTrailingStop, "Trailing ATR Stop", color=color.new(color.fuchsia, 0), style=plot.style_linebr)
